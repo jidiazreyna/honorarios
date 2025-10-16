@@ -1,0 +1,9 @@
+﻿node_modules/
+playwright-report/
+test-results/
+*.log
+.vscode/
+.DS_Store
+dist/
+build/
+.env

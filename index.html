@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Regulación de Honorarios (UMA) — P1/P2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{--bg:#fafafa;--fg:#1a1a1a;--muted:#666;--card:#fff;--acc:#0b6efd;}
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+      font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",Arial,Helvetica,sans-serif}
+    .wrap{max-width:980px;margin:24px auto;padding:0 16px}
+    h1{font-size:1.3rem;margin:0 0 12px}
+    .card{background:var(--card);border:1px solid #e6e6e6;border-radius:12px;padding:16px;margin-bottom:14px}
+    .grid{display:grid;grid-template-columns:230px 1fr;gap:10px 16px;align-items:center}
+    label{color:#333;font-weight:600}
+    input[type="text"],input[type="number"],input[type="date"]{width:100%;padding:10px 12px;border:1px solid #dcdcdc;border-radius:8px;font-size:.98rem}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .btn{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer;background:var(--acc);color:#fff}
+    .btn.secondary{background:#e9ecef;color:#111}
+    .btn:disabled{opacity:.65;cursor:not-allowed}
+    .muted{color:var(--muted);font-size:.92rem}
+    .out{white-space:pre-wrap;background:#fff;border:1px solid #eee;border-radius:10px;padding:12px;min-height:160px}
+    @media (max-width:720px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Regulación de Honorarios (UMA) — P1/P2 (excedente = % mínimo)</h1>
+
+  <div class="card">
+    <h2 style="margin-top:0">1) Planilla y actualización de la base (P 14.290)</h2>
+    <div class="grid">
+      <label for="cap">Capital de planilla ($)</label>
+      <input id="cap" type="text" placeholder="15.000.000,00">
+
+      <label for="int">Intereses de planilla ($)</label>
+      <input id="int" type="text" placeholder="5.000.000,00">
+
+      <label for="corte">Fecha de corte (planilla)</label>
+      <input id="corte" type="date">
+
+      <label for="calc">Fecha de CÁLCULO (hasta)</label>
+      <input id="calc" type="date">
+        <label for="interesBcra">Monto total P 14290 (vía BCRA) ($)</label>
+        <input id="interesBcra" type="text" placeholder="Se completa con el botón de abajo">
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <button id="btnBcra" class="btn">Calcular (vía BCRA)</button>
+      <button id="btnClearInt" class="btn secondary">Borrar interés</button>
+      <div class="muted">Toma <b>monto = capital + intereses</b>, <b>inicio = fecha de corte</b>, <b>cierre = fecha de cálculo</b>.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">2) Conversión a UMA y regulación (P1/P2)</h2>
+    <div class="grid">
+      <label for="umaCalc">UMA a la fecha de cálculo ($)</label>
+      <input id="umaCalc" type="text" placeholder="20.567,79">
+
+      <div></div>
+      <div class="muted">El excedente se regula <b>siempre</b> al % <b>mínimo</b> del tramo actual.</div>
+
+      <div></div>
+      <div class="row">
+        <label><input id="chkApod" type="checkbox" checked> Aplicar +40% (apoderado)</label>
+        <label><input id="chk41" type="checkbox" checked> Aplicar ½ art. 41</label>
+        <label><input id="chkMenos10" type="checkbox" checked> No hubo excepciones (–10%)</label>
+      </div>
+
+      <label for="umaPago">UMA al pago ($) (opcional)</label>
+      <input id="umaPago" type="text" placeholder="77.227,00">
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <button id="btnCalc" class="btn">Calcular regulación completa</button>
+      <button id="btnClearAll" class="btn secondary">Limpiar</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Resultado</h2>
+    <div id="out" class="out"></div>
+    <div class="muted" style="margin-top:8px">
+      Intereses integran la base (art. 24); sin anatocismo (art. 770 CCyC). Escala art. 21; +40% apoderado, ½ art. 41; −10% si no hubo excepciones. Excedente: % mínimo del tramo actual.
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===== util ===== */
+const $ = (id)=>document.getElementById(id);
+function parseAR(s){ return parseFloat(String(s||'0').replace(/\./g,'').replace(',', '.')) || 0; }
+function fmt2(x){ return Number(x).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmt4(x){ return Number(x).toLocaleString('es-AR',{minimumFractionDigits:4,maximumFractionDigits:4}); }
+function addDays(iso, n){ const d=new Date(iso); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
+
+/* ===== escala UMA (art. 21) ===== */
+const ESCALA = [
+  {min:0,max:15,pct_min:0.22,pct_max:0.33},
+  {min:16,max:45,pct_min:0.20,pct_max:0.26},
+  {min:46,max:90,pct_min:0.18,pct_max:0.24},
+  {min:91,max:150,pct_min:0.17,pct_max:0.22},
+  {min:151,max:450,pct_min:0.15,pct_max:0.20},
+  {min:451,max:750,pct_min:0.13,pct_max:0.17},
+  {min:751,max:null,pct_min:0.12,pct_max:0.15},
+];
+function buscarTramo(uma){
+  for (let i=0;i<ESCALA.length;i++){
+    const t=ESCALA[i];
+    if (t.max===null ? uma>=t.min : (uma>=t.min && uma<=t.max)) return [i,t];
+  }
+  return [0, ESCALA[0]];
+}
+function regularUMA(uma_total, apod, art41, menos10){
+  const [idx, act] = buscarTramo(uma_total);
+  const prev = idx>0 ? ESCALA[idx-1] : null;
+  const prevMaxUMA = prev ? prev.max : 0;
+  const pctPrev = prev ? prev.pct_max : 0;
+
+  const p1 = Math.min(uma_total, prevMaxUMA);
+  const p2 = Math.max(0, uma_total - p1);
+
+  let mult = 1.0;
+  if (apod) mult *= 1.4;
+  if (art41) mult *= 0.5;
+  if (menos10) mult *= 0.9;
+
+  const pctP1 = pctPrev * mult;
+  const pctP2 = act.pct_min * mult;
+
+  const resA = p1 * pctP1;
+  const resB = p2 * pctP2;
+  return { honor: resA + resB, detalle:{act,p1,p2,pctP1,pctP2,resA,resB} };
+}
+
+/* ===== eventos ===== */
+$('btnBcra').addEventListener('click', async () => {
+  try {
+    const capital   = parseAR($('cap').value);
+    const intereses = parseAR($('int').value);
+    const corte     = $('corte').value;  // YYYY-MM-DD del input date
+    const calc      = $('calc').value;   // YYYY-MM-DD
+
+    if (!(capital>=0))   throw new Error('Ingrese un capital válido.');
+    if (!(intereses>=0)) throw new Error('Ingrese intereses de planilla válidos.');
+    if (!corte || !calc) throw new Error('Complete fecha de corte y fecha de cálculo.');
+
+    $('btnBcra').disabled = true; $('btnBcra').textContent = 'Consultando BCRA…';
+    const r = await fetch('/api/bcra', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ capital, intereses, corteISO: corte, calculoISO: calc })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'No se pudo obtener el interés.');
+    $('interesBcra').value = fmt2(data.interes);
+  } catch (e) {
+    alert(e.message || e);
+  } finally {
+    $('btnBcra').disabled = false; $('btnBcra').textContent = 'Calcular (vía BCRA)';
+  }
+});
+
+$('btnClearInt').addEventListener('click', ()=> $('interesBcra').value='');
+
+$('btnCalc').addEventListener('click', () => {
+  try {
+    const cap = parseAR($('cap').value);
+    const intePlan = parseAR($('int').value);
+    const corte = $('corte').value;
+    const calc  = $('calc').value;
+
+    const totalBcra = parseAR($('interesBcra').value); // ahora contiene el MONTO TOTAL del BCRA
+    const umaCalc = parseAR($('umaCalc').value);
+    const umaPago = parseAR($('umaPago').value);
+
+    if (!(cap>=0)) throw new Error('Capital inválido.');
+    if (!(intePlan>=0)) throw new Error('Intereses de planilla inválidos.');
+    if (!corte || !calc) throw new Error('Complete las fechas.');
+    if (!(totalBcra>0)) throw new Error('Obtenga el monto total P 14290 (vía BCRA).');
+    if (!(umaCalc>0)) throw new Error('Ingrese UMA a la fecha de cálculo.');
+
+    const desdeISO = corte;   // inicio = fecha de corte (no día siguiente)
+    const hastaISO = calc;
+
+    // *** BASE REGULATORIA = MONTO TOTAL P14290 (BCRA) ***
+    const baseReg = totalBcra;
+
+    const umaTot = baseReg / umaCalc;
+
+    const { honor, detalle:det } = regularUMA(
+      umaTot, $('chkApod').checked, $('chk41').checked, $('chkMenos10').checked
+    );
+
+    const maxTxt = det.act.max==null ? 'sin tope' : String(det.act.max|0);
+
+    let t = '';
+    t += 'REGULACIÓN DE HONORARIOS (UMA) — P1/P2\n';
+    t += '--------------------------------------\n';
+    t += '1) Base (P 14.290)\n';
+    t += `Capital planilla: $ ${fmt2(cap)}\n`;
+    t += `Intereses planilla: $ ${fmt2(intePlan)}\n`;
+    t += `Período BCRA: ${new Date(desdeISO).toLocaleDateString('es-AR')} → ${new Date(hastaISO).toLocaleDateString('es-AR')}\n`;
+    t += `Monto base enviado al BCRA (cap + int): $ ${fmt2(cap + intePlan)}\n`;
+    t += `Monto total P 14290 (BCRA): $ ${fmt2(totalBcra)}\n`;
+    t += `BASE REGULATORIA: $ ${fmt2(baseReg)}\n\n`;
+
+    t += '2) Conversión a UMA y P1/P2\n';
+    t += `UMA (fecha de cálculo): $ ${fmt2(umaCalc)}  →  UMA totales: ${fmt4(umaTot)}\n`;
+    t += `Tramo actual: ${det.act.min|0} a ${maxTxt} UMAs (excedente al % mínimo)\n`;
+    t += `P1: ${fmt4(det.p1)} UMAs × ${(det.pctP1*100).toFixed(2)}% = ${fmt4(det.resA)} UMAs\n`;
+    t += `P2: ${fmt4(det.p2)} UMAs × ${(det.pctP2*100).toFixed(2)}% = ${fmt4(det.resB)} UMAs\n`;
+    t += `Ajustes: +40% apoderado=${$('chkApod').checked}, ½ art.41=${$('chk41').checked}, −10% sin excepciones=${$('chkMenos10').checked}\n`;
+    t += `HONORARIOS: ${fmt4(honor)} UMAs\n`;
+
+    if (umaPago>0) {
+      t += `\n3) Importe estimado al pago\n`;
+      t += `UMA al pago: $ ${fmt2(umaPago)} → HONORARIOS: $ ${fmt2(honor*umaPago)}\n`;
+    }
+    $('out').textContent = t;
+  } catch (e) { alert(e.message || e); }
+});
+
+$('btnClearAll').addEventListener('click', ()=>{
+  ['cap','int','corte','calc','interesBcra','umaCalc','umaPago'].forEach(id=>$(id).value='');
+  $('chkApod').checked=true; $('chk41').checked=true; $('chkMenos10').checked=true;
+  $('out').textContent='';
+});
+</script>
+</body>
+</html>

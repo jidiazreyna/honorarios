@@ -1,0 +1,256 @@
+// server.js — llena Inicio = fecha de corte, Cierre = fecha de cálculo y Monto = capital + intereses
+// en la calculadora P 14290 del BCRA (sin API). Lee "Monto total" y lo devuelve al front.
+const express = require('express');
+const path = require('path');
+const { chromium } = require('playwright');
+
+const BCRA_URL = 'https://www.bcra.gob.ar/BCRAyVos/calculadora-intereses-tasa-justicia.asp';
+
+const app = express();
+app.use(express.json());
+
+// Servimos index.html desde la carpeta actual
+const ROOT = __dirname;
+app.use(express.static(ROOT));
+app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
+
+// ---------- utils ----------
+function parseARnum(str) {
+  return parseFloat(String(str).replace(/\./g, '').replace(',', '.'));
+}
+const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+// Forzar value + eventos (sirve para type="date" y máscaras)
+async function forceSetValue(page, locator, value) {
+  await locator.evaluate((el, val) => {
+    el.focus();
+    el.value = val;
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.blur();
+  }, value);
+}
+
+// ==== FECHAS ====
+// Busca y setea fecha por varias estrategias; which: "inicio" | "cierre"
+// Escribe SIEMPRE en ISO YYYY-MM-DD (lo que aceptan los <input type="date">)
+async function setFecha(page, which, isoValue) {
+  const isInicio = which === 'inicio';
+
+  // 1) Intento por ID/NAME conocidos
+  const selKNOWN = isInicio
+    ? '#FechaInicio, input[name="FechaInicio"]'
+    : '#FechaCierre, input[name="FechaCierre"], #FechaFin, input[name="FechaFin"]';
+
+  const known = page.locator(selKNOWN).first();
+  if (await known.count()) {
+    await known.scrollIntoViewIfNeeded().catch(() => {});
+    try {
+      await known.fill(isoValue, { timeout: 2000 });
+      const got = await known.inputValue({ timeout: 500 }).catch(() => '');
+      if (got === isoValue) return true;
+    } catch {}
+    await forceSetValue(page, known, isoValue);
+    return true;
+  }
+
+  // 2) Por <label> “Seleccionar fecha de inicio/cierre”
+  const okByLabel = await page.evaluate((args) => {
+    const { which, val } = args;
+    const normalize = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const labelNeedle = which === 'inicio' ? 'seleccionar fecha de inicio' : 'seleccionar fecha de cierre';
+    const labels = Array.from(document.querySelectorAll('label'));
+    for (const lb of labels) {
+      if (normalize(lb.textContent).includes(labelNeedle)) {
+        const forId = lb.getAttribute('for');
+        let el = (forId && document.getElementById(forId))
+          || lb.parentElement?.querySelector('input')
+          || lb.nextElementSibling?.querySelector?.('input')
+          || lb.nextElementSibling;
+        if (el && el.tagName === 'INPUT') {
+          el.focus();
+          el.value = val;
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.blur();
+          return true;
+        }
+      }
+    }
+    return false;
+  }, { which, val: isoValue });
+  if (okByLabel) return true;
+
+  // 3) Último recurso: por índice de input[type=date] (0 = inicio, 1 = cierre)
+  const idx = isInicio ? 0 : 1;
+  const tryIndex = await page.evaluate((args) => {
+    const { i, val } = args;
+    const dates = Array.from(document.querySelectorAll('input[type="date"], input[placeholder*="dd/mm" i]'));
+    if (dates[i]) {
+      const el = dates[i];
+      el.focus();
+      el.value = val;
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.blur();
+      return true;
+    }
+    return false;
+  }, { i: idx, val: isoValue });
+  return tryIndex;
+}
+
+// ==== MONTO ====
+// setea el monto buscando #Monto/name=Monto o por su <label> “Ingresar un monto”
+async function setMonto(page, valor) {
+  const selMonto = '#Monto, input[name="Monto"], input[type="text"]:not([placeholder*="dd/mm"])';
+  const loc = page.locator(selMonto).first();
+  if (await loc.count()) {
+    await loc.scrollIntoViewIfNeeded().catch(() => {});
+    try {
+      await loc.fill(String(valor), { timeout: 2000 });
+      const got = await loc.inputValue({ timeout: 500 }).catch(() => '');
+      if (got) return true;
+    } catch {}
+    await forceSetValue(page, loc, String(valor));
+    return true;
+  }
+  // por label
+  const ok = await page.evaluate((val) => {
+    const normalize = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const labels = Array.from(document.querySelectorAll('label'));
+    for (const lb of labels) {
+      if (normalize(lb.textContent).includes('ingresar un monto')) {
+        const forId = lb.getAttribute('for');
+        let el = (forId && document.getElementById(forId))
+          || lb.parentElement?.querySelector('input')
+          || lb.nextElementSibling?.querySelector?.('input')
+          || lb.nextElementSibling;
+        if (el && el.tagName === 'INPUT') {
+          el.focus();
+          el.value = String(val);
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.blur();
+          return true;
+        }
+      }
+    }
+    return false;
+  }, String(valor));
+  return ok;
+}
+
+// Click en “Calcular”
+async function clickCalcular(page) {
+  try { await page.getByRole('button', { name: /^calcular$/i }).click({ timeout: 4000 }); return; } catch {}
+  try { await page.click('text=/^\\s*Calcular\\s*$/i', { timeout: 4000 }); return; } catch {}
+  const done = await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button,input[type="submit"],a'))
+      .find(el => /calcular/i.test(el.textContent || el.value || ''));
+    if (btn) { btn.scrollIntoView(); btn.click(); return true; }
+    return false;
+  });
+  if (!done) throw new Error('No encontré el botón "Calcular".');
+}
+
+// === Leer resultados: { intereses, total } — toma SIEMPRE la 2ª alerta (Monto total)
+async function extraerMontos(page) {
+  // espera a que aparezcan las cajas de resultado
+  await page.waitForSelector('.alert-success, .alert.alert-success', { timeout: 15000 });
+
+  const res = await page.evaluate(() => {
+    const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const getAmount = el => {
+      const m = (el.innerText || '').match(/\$\s*([\d\.\,]+)/);
+      return m ? m[1] : null;
+    };
+
+    const alerts = Array.from(document.querySelectorAll('.alert-success, .alert.alert-success'));
+
+    // Intenta por texto del rótulo
+    let intereses = null, total = null;
+    for (const a of alerts) {
+      const t = norm(a.innerText || '');
+      if (t.includes('monto de intereses')) intereses = getAmount(a);
+      if (t.includes('monto total'))      total     = getAmount(a);
+    }
+
+    // Fallback por posición: en esta página la 2ª caja es el "Monto total"
+    if (!total && alerts[1]) total = getAmount(alerts[1]);
+    if (!intereses && alerts[0]) intereses = getAmount(alerts[0]);
+
+    // Además devolvemos la secuencia por si hay otro fallback en Node
+    const seq = alerts.map(a => getAmount(a)).filter(Boolean);
+    return { intereses, total, seq };
+  });
+
+  const toNum = s => s == null ? null : parseFloat(String(s).replace(/\./g, '').replace(',', '.'));
+
+  let intereses = toNum(res.intereses);
+  let total     = toNum(res.total);
+
+  // Último fallback: toma el mayor de las cajas (normalmente es el total)
+  if (total == null && res.seq && res.seq.length) {
+    total = res.seq.map(toNum).sort((a, b) => b - a)[0] ?? null;
+  }
+  if (intereses == null && res.seq && res.seq.length > 1) {
+    intereses = toNum(res.seq[0]);
+  }
+
+  if (total == null) throw new Error('No pude leer el “Monto total” en la página del BCRA.');
+  return { intereses, total };
+}
+
+
+// ---------- endpoint principal ----------
+app.post('/api/bcra', async (req, res) => {
+  const { capital, intereses, corteISO, calculoISO } = req.body || {};
+  if (!(capital >= 0) || !(intereses >= 0) || !corteISO || !calculoISO) {
+    return res.status(400).json({ error: 'Parámetros inválidos.' });
+  }
+
+  // Mapeo que pediste
+  const fechaInicioISO = corteISO;      // inicio = fecha de corte (planilla)
+  const fechaCierreISO = calculoISO;    // cierre = fecha de cálculo (hasta)
+  const montoTotal     = Number(capital) + Number(intereses); // cap + int
+
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage({ locale: 'es-AR' });
+    await page.goto(BCRA_URL, { waitUntil: 'domcontentloaded', timeout: 180000 });
+
+    // Cerrar banners (si aparecen)
+    try { await page.getByRole('button', { name: /aceptar|entendido|continuar/i }).click({ timeout: 1500 }); } catch {}
+
+    // === Completar fechas ===
+    const okInicio = await setFecha(page, 'inicio', fechaInicioISO);
+    const okCierre = await setFecha(page, 'cierre', fechaCierreISO);
+    if (!okInicio) throw new Error('No pude completar la “fecha de inicio”.');
+    if (!okCierre) throw new Error('No pude completar la “fecha de cierre”.');
+
+    // === Completar monto ===
+    const okMonto = await setMonto(page, String(montoTotal));
+    if (!okMonto) throw new Error('No pude completar el “monto”.');
+
+    // === Calcular ===
+    await clickCalcular(page);
+
+    // === Leer resultados (preferimos TOTAL) ===
+    const { intereses: mInt, total: mTot } = await extraerMontos(page);
+    const elegido = (mTot != null) ? mTot : mInt;
+
+    // Para compatibilidad, el frontend espera "interes"; le mando el TOTAL.
+    res.json({ ok: true, interes: elegido, detalle: { intereses: mInt, total: mTot } });
+
+  } catch (err) {
+    console.error('BCRA error:', err);
+    res.status(500).json({ error: String(err.message || err) });
+  } finally {
+    if (browser) { try { await browser.close(); } catch {} }
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Servidor en http://localhost:${PORT}`));
