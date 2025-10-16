@@ -1,17 +1,14 @@
 {
   "name": "honorarios",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "build:pw": "npx playwright install --with-deps"
+    "postinstall": "npx playwright install chromium",
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "express": "^5.1.0",
-    "playwright": "^1.56.0"
+    "express": "^4.19.2",
+    "playwright": "^1.47.2"
   }
 }
