@@ -12,12 +12,16 @@ const app = express();
 app.use(express.json());
 
 /* ==================== Playwright en Render ==================== */
-if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
-  // En Render queda en /opt/render/.cache/ms-playwright si lo instalás en el build
+const LOCAL_BROWSERS_PATH = path.join(__dirname, '.playwright');
+
+try { fs.mkdirSync(LOCAL_BROWSERS_PATH, { recursive: true }); } catch {}
+
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH || process.env.PLAYWRIGHT_BROWSERS_PATH === '0') {
+  // Guardar los binarios dentro del proyecto garantiza que Render los incluya en la imagen final.
   process.env.PLAYWRIGHT_BROWSERS_PATH =
     (process.env.RENDER || process.env.RENDER_EXTERNAL_URL)
-      ? '/opt/render/.cache/ms-playwright'
-      : '0'; // local
+      ? LOCAL_BROWSERS_PATH
+      : process.env.PLAYWRIGHT_BROWSERS_PATH || '0';
 }
 
 /* ---------- util: búsqueda robusta del binario de Chromium ---------- */
