@@ -5,7 +5,7 @@
   "type": "commonjs",
   "engines": { "node": ">=20 <23" },
   "scripts": {
-    "playwright:install": "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium",
+    "playwright:install": "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell",
     "start": "node server.js"
   },
   "dependencies": {
