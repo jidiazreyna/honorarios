@@ -10,6 +10,7 @@ yarn-error.log*
 # Playwright
 playwright-report/
 playwright/.cache/
+.playwright/
 .test-results/
 trace.zip
 
