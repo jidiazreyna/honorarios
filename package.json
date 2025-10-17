@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "engines": { "node": ">=20 <23" },
   "scripts": {
     "postinstall": "npx playwright install chromium",
     "start": "node server.js"
@@ -10,8 +11,5 @@
   "dependencies": {
     "express": "^4.19.2",
     "playwright": "^1.47.2"
-  },
-  "engines": {
-    "node": ">=20 <23"
   }
 }
