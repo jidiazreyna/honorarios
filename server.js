@@ -1,7 +1,5 @@
-// server.js — llena Inicio = fecha de corte, Cierre = fecha de cálculo y
-// Monto = capital + intereses en la calculadora P 14290 del BCRA (sin API).
-// Lee "Monto total" y lo devuelve al front. Listo para Render con fallback
-// de binario (headless_shell -> chrome).
+// server.js — completa la calculadora P14290 del BCRA (sin API) usando Playwright
+// y devuelve el MONTO TOTAL. Preparado para Render: fuerza executablePath.
 
 const express = require('express');
 const path = require('path');
@@ -12,13 +10,41 @@ const BCRA_URL = 'https://www.bcra.gob.ar/BCRAyVos/calculadora-intereses-tasa-ju
 const app = express();
 app.use(express.json());
 
-// ===== Entorno Playwright/Render =====
+// ====== Playwright en Render ======
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
-  if (process.env.RENDER || process.env.RENDER_EXTERNAL_URL) {
-    process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/render/.cache/ms-playwright';
-  } else {
-    process.env.PLAYWRIGHT_BROWSERS_PATH = '0'; // local: dentro de node_modules
+  // En Render queda en /opt/render/.cache/ms-playwright si lo instalás en el build
+  process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.RENDER || process.env.RENDER_EXTERNAL_URL
+    ? '/opt/render/.cache/ms-playwright'
+    : '0'; // local
+}
+
+// Busca el binario real (chrome o headless_shell) dentro de PLAYWRIGHT_BROWSERS_PATH
+function findExecutable() {
+  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || '';
+  const candidates = [];
+
+  const pushIfExists = p => { if (p && fs.existsSync(p)) candidates.push(p); };
+
+  // Recorrer subdirectorios chromium-* y chromium_headless_shell-*
+  if (root && fs.existsSync(root)) {
+    const dirs = fs.readdirSync(root).filter(d =>
+      d.startsWith('chromium-') || d.startsWith('chromium_headless_shell-')
+    );
+    // preferimos chrome, luego headless_shell
+    for (const d of dirs) {
+      pushIfExists(path.join(root, d, 'chrome-linux', 'chrome'));
+      pushIfExists(path.join(root, d, 'chrome-linux', 'headless_shell'));
+    }
   }
+
+  // fallback a lo que Playwright cree tener (por si corre local con node_modules)
+  try {
+    const guessed = chromium.executablePath?.();
+    pushIfExists(guessed);
+  } catch {}
+
+  // Devolver el primero válido (chrome > headless_shell)
+  return candidates.find(p => /\/chrome$/.test(p)) || candidates[0] || null;
 }
 
 // ===== Static / index.html =====
@@ -30,8 +56,9 @@ app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
 function parseARnum(str) {
   return parseFloat(String(str).replace(/\./g, '').replace(',', '.'));
 }
-const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
+// Forzar value + eventos
 async function forceSetValue(page, locator, value) {
   await locator.evaluate((el, val) => {
     el.focus();
@@ -144,7 +171,7 @@ async function setMonto(page, valor) {
   return ok;
 }
 
-// Click en “Calcular”
+// Click “Calcular”
 async function clickCalcular(page) {
   try { await page.getByRole('button', { name: /^calcular$/i }).click({ timeout: 5000 }); return; } catch {}
   try { await page.click('text=/^\\s*Calcular\\s*$/i', { timeout: 5000 }); return; } catch {}
@@ -157,7 +184,7 @@ async function clickCalcular(page) {
   if (!done) throw new Error('No encontré el botón "Calcular".');
 }
 
-// === Leer resultados: { intereses, total } — preferimos SIEMPRE “Monto total”
+// Leer resultados (preferir “Monto total”)
 async function extraerMontos(page) {
   await page.waitForSelector('.alert-success, .alert.alert-success', { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(1200);
@@ -168,50 +195,42 @@ async function extraerMontos(page) {
       const m = String(text || '').match(/\$\s*([\d\.\,]+)/);
       return m ? m[1] : null;
     };
-
     const alerts = Array.from(document.querySelectorAll('.alert-success, .alert.alert-success'))
       .map((el, idx) => {
         const text = el.innerText || '';
-        return {
-          idx,
-          text,
-          normText: norm(text),
-          amountRaw: getAmount(text),
-        };
+        return { idx, text, normText: norm(text), amountRaw: getAmount(text) };
       });
 
     const totalByText = alerts.find(a => a.normText.includes('monto total'))?.amountRaw || null;
     const interesesByText = alerts.find(a => a.normText.includes('monto de intereses'))?.amountRaw || null;
-
     return { alerts, totalByText, interesesByText };
   });
 
   const toNum = (s) => (s == null ? null : parseFloat(String(s).replace(/\./g, '').replace(',', '.')));
 
   const amounts = (res.alerts || [])
-    .map((a) => ({ idx: a.idx, value: toNum(a.amountRaw) }))
-    .filter((a) => Number.isFinite(a.value));
+    .map(a => ({ idx: a.idx, value: toNum(a.amountRaw) }))
+    .filter(a => Number.isFinite(a.value));
 
   let total = toNum(res.totalByText);
   let intereses = toNum(res.interesesByText);
 
   if (total == null) {
-    const secondBox = amounts.find((a) => a.idx === 1);
+    const secondBox = amounts.find(a => a.idx === 1);
     if (secondBox) total = secondBox.value;
   }
   if (intereses == null) {
-    const firstBox = amounts.find((a) => a.idx === 0);
+    const firstBox = amounts.find(a => a.idx === 0);
     if (firstBox) intereses = firstBox.value;
   }
 
   if (amounts.length) {
-    const sorted = [...amounts].sort((a, b) => b.value - a.value).map((a) => a.value);
+    const sorted = [...amounts].sort((a, b) => b.value - a.value).map(a => a.value);
     if (total == null) total = sorted[0];
     if (intereses == null && sorted.length > 1) {
       const uniqueSorted = Array.from(new Set(sorted));
-      const candidate = uniqueSorted.find((val) => val !== total);
-      if (candidate != null) intereses = candidate;
-      else if (uniqueSorted.length > 1) intereses = uniqueSorted[1];
+      const candidate = uniqueSorted.find(val => val !== total);
+      intereses = candidate != null ? candidate : uniqueSorted[1];
     }
   }
 
@@ -219,40 +238,19 @@ async function extraerMontos(page) {
   return { intereses: intereses ?? null, total };
 }
 
-// ===== Resolver binario: headless_shell si existe; si no, chrome =====
-function resolveExecutablePath() {
-  const base = process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/render/.cache/ms-playwright';
-  // Buscar cualquier revisión (no fijamos 1194 por si cambia)
-  const list = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).map(n => path.join(dir, n)) : []);
-  const tryPaths = [];
-
-  // Preferir headless_shell
-  list(base).forEach(p => {
-    if (p.includes('chromium_headless_shell-')) {
-      tryPaths.push(path.join(p, 'chrome-linux', 'headless_shell'));
-    }
-  });
-  // Luego chrome normal
-  list(base).forEach(p => {
-    if (p.includes('chromium-')) {
-      tryPaths.push(path.join(p, 'chrome-linux', 'chrome'));
-    }
-  });
-
-  for (const p of tryPaths) {
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-// ===== Lanzar navegador con fallback de ejecutable =====
+// ===== Lanzar Chromium forzando executablePath si hace falta =====
 async function launchBrowser() {
-  const execPath = resolveExecutablePath();
-  console.log('Chromium detectado:', execPath || '(ninguno — usaremos el default de Playwright si existe)');
-
+  const exe = findExecutable();
+  if (!exe) {
+    throw new Error(
+      'No se encontró Chromium en PLAYWRIGHT_BROWSERS_PATH. ' +
+      'Asegurate de ejecutar en el build: "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell".'
+    );
+  }
+  console.log('Usando Chromium en:', exe);
   return await chromium.launch({
     headless: true,
-    ...(execPath ? { executablePath: execPath } : {}),
+    executablePath: exe,               // <-- fuerza el binario que SÍ existe
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -271,9 +269,9 @@ app.post('/api/bcra', async (req, res) => {
     return res.status(400).json({ error: 'Parámetros inválidos.' });
   }
 
-  const fechaInicioISO = corteISO;   // inicio = fecha de corte (planilla)
-  const fechaCierreISO = calculoISO; // cierre = fecha de cálculo (hasta)
-  const montoTotal     = Number(capital) + Number(intereses); // cap + int
+  const fechaInicioISO = corteISO;
+  const fechaCierreISO = calculoISO;
+  const montoTotal = Number(capital) + Number(intereses);
 
   let browser;
   try {
@@ -294,51 +292,30 @@ app.post('/api/bcra', async (req, res) => {
     await clickCalcular(page);
 
     const { intereses: mInt, total: mTot } = await extraerMontos(page);
-    const elegido = (mTot != null) ? mTot : mInt;
+    const elegido = mTot != null ? mTot : mInt;
 
-    // Para compatibilidad con el front: devolvemos en campo "interes" el TOTAL.
     res.json({ ok: true, interes: elegido, detalle: { intereses: mInt, total: mTot } });
-
   } catch (err) {
     console.error('BCRA error:', err);
     res.status(500).json({
       error: String(err && err.message ? err.message : err),
-      hint: 'Si persiste, comprobá que en el build se ejecutó "npx playwright install chromium chromium-headless-shell" y que PLAYWRIGHT_BROWSERS_PATH apunta al cache.'
+      hint: 'Chromium debe estar instalado en PLAYWRIGHT_BROWSERS_PATH. Revisá el log de build.'
     });
   } finally {
     if (browser) { try { await browser.close(); } catch {} }
   }
 });
 
-// ===== Endpoints de salud y diagnóstico =====
+// Salud/diag
 app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
-
-app.get('/diag', async (_req, res) => {
-  const out = {};
-  try {
-    out.node = process.version;
-    out.env = {
-      PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
-      NODE_ENV: process.env.NODE_ENV,
-      RENDER: !!process.env.RENDER || !!process.env.RENDER_EXTERNAL_URL
-    };
-    out.execResolved = resolveExecutablePath();
-    if (out.execResolved) out.execExists = fs.existsSync(out.execResolved);
-    let ok = false;
-    try {
-      const b = await chromium.launch({
-        headless: true,
-        ...(out.execResolved ? { executablePath: out.execResolved } : {}),
-        args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--no-zygote','--single-process']
-      });
-      await b.close();
-      ok = true;
-    } catch (e) { out.launchError = String(e); }
-    out.canLaunch = ok;
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ error: String(e), partial: out });
-  }
+app.get('/diag', (_req, res) => {
+  const exe = findExecutable();
+  res.json({
+    node: process.version,
+    PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
+    executableFound: exe,
+    exists: exe ? fs.existsSync(exe) : false
+  });
 });
 
 const PORT = process.env.PORT || 3000;
