@@ -153,8 +153,26 @@ $('btnBcra').addEventListener('click', async () => {
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ capital, intereses, corteISO: corte, calculoISO: calc })
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'No se pudo obtener el interés.');
+
+    let data;
+    let rawText = '';
+    const contentType = r.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      data = await r.json();
+    } else {
+      rawText = await r.text();
+    }
+
+    if (!r.ok) {
+      const msg = data?.error || rawText || 'No se pudo obtener el interés.';
+      throw new Error(msg);
+    }
+
+    if (!data || typeof data.interes !== 'number') {
+      const fallbackMsg = rawText ? rawText.slice(0, 200) : 'Respuesta inesperada del servidor (sin JSON).';
+      throw new Error(fallbackMsg);
+    }
+
     $('interesBcra').value = fmt2(data.interes);
   } catch (e) {
     alert(e.message || e);
