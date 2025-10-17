@@ -10,20 +10,26 @@ const BCRA_URL = 'https://www.bcra.gob.ar/BCRAyVos/calculadora-intereses-tasa-ju
 const app = express();
 app.use(express.json());
 
-// ====== Playwright en Render ======
+/* ==================== Playwright en Render ==================== */
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
   // En Render queda en /opt/render/.cache/ms-playwright si lo instalás en el build
-  process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.RENDER || process.env.RENDER_EXTERNAL_URL
-    ? '/opt/render/.cache/ms-playwright'
-    : '0'; // local
+  process.env.PLAYWRIGHT_BROWSERS_PATH =
+    (process.env.RENDER || process.env.RENDER_EXTERNAL_URL)
+      ? '/opt/render/.cache/ms-playwright'
+      : '0'; // local
 }
 
-// Busca el binario real (chrome o headless_shell) dentro de PLAYWRIGHT_BROWSERS_PATH
+/* ---------- util: búsqueda robusta del binario de Chromium ---------- */
+function listDirSafe(dir) {
+  try { return fs.readdirSync(dir); } catch { return []; }
+}
+
 function findExecutable() {
   const roots = new Set();
 
   // 1) Preferí la ruta de Render
   if (process.env.PLAYWRIGHT_BROWSERS_PATH) roots.add(process.env.PLAYWRIGHT_BROWSERS_PATH);
+
   // 2) Raíz por defecto en Render (por si la env var no llegó al runtime)
   roots.add('/opt/render/.cache/ms-playwright');
 
@@ -44,9 +50,10 @@ function findExecutable() {
   // 4) Búsqueda por patrones dentro de los roots
   for (const root of roots) {
     if (!root || !fs.existsSync(root)) continue;
-    const dirs = fs.readdirSync(root).filter(d =>
-      d.startsWith('chromium-') || d.startsWith('chromium_headless_shell-')
-    );
+
+    const dirs = listDirSafe(root)
+      .filter(d => d.startsWith('chromium-') || d.startsWith('chromium_headless_shell-'))
+      .sort();
 
     // Probar primero chrome, luego headless_shell
     for (const d of dirs) {
@@ -62,13 +69,39 @@ function findExecutable() {
   return null;
 }
 
+async function launchBrowser() {
+  const exe = findExecutable();
+  console.log('[diag] PLAYWRIGHT_BROWSERS_PATH =', process.env.PLAYWRIGHT_BROWSERS_PATH);
+  try { console.log('[diag] chromium.executablePath() =', chromium.executablePath?.()); } catch {}
+  console.log('[diag] resolved executable =', exe, 'exists?', exe ? fs.existsSync(exe) : false);
 
-// ===== Static / index.html =====
+  if (!exe) {
+    throw new Error(
+      'No se encontró Chromium. Asegurate de instalarlo en el build con:\n' +
+      'PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell'
+    );
+  }
+
+  return await chromium.launch({
+    headless: true,
+    executablePath: exe,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--no-zygote',
+      '--single-process'
+    ]
+  });
+}
+
+/* ==================== Static / index.html ==================== */
 const ROOT = __dirname;
 app.use(express.static(ROOT));
 app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
 
-// ---------- utils ----------
+/* ==================== Utilidades de DOM ==================== */
 function parseARnum(str) {
   return parseFloat(String(str).replace(/\./g, '').replace(',', '.'));
 }
@@ -85,7 +118,7 @@ async function forceSetValue(page, locator, value) {
   }, value);
 }
 
-// ==== FECHAS ====
+/* ==================== Completar fechas ==================== */
 async function setFecha(page, which, isoValue) {
   const isInicio = which === 'inicio';
   const selKNOWN = isInicio
@@ -148,7 +181,7 @@ async function setFecha(page, which, isoValue) {
   return tryIndex;
 }
 
-// ==== MONTO ====
+/* ==================== Completar monto ==================== */
 async function setMonto(page, valor) {
   const selMonto = '#Monto, input[name="Monto" i], input[type="text"]:not([placeholder*="dd/mm"])';
   const loc = page.locator(selMonto).first();
@@ -187,7 +220,7 @@ async function setMonto(page, valor) {
   return ok;
 }
 
-// Click “Calcular”
+/* ==================== Click “Calcular” ==================== */
 async function clickCalcular(page) {
   try { await page.getByRole('button', { name: /^calcular$/i }).click({ timeout: 5000 }); return; } catch {}
   try { await page.click('text=/^\\s*Calcular\\s*$/i', { timeout: 5000 }); return; } catch {}
@@ -200,7 +233,7 @@ async function clickCalcular(page) {
   if (!done) throw new Error('No encontré el botón "Calcular".');
 }
 
-// Leer resultados (preferir “Monto total”)
+/* ==================== Leer resultados (preferir “Monto total”) ==================== */
 async function extraerMontos(page) {
   await page.waitForSelector('.alert-success, .alert.alert-success', { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(1200);
@@ -254,32 +287,7 @@ async function extraerMontos(page) {
   return { intereses: intereses ?? null, total };
 }
 
-// ===== Lanzar Chromium forzando executablePath si hace falta =====
-async function launchBrowser() {
-  const exe = findExecutable();
-  if (!exe) {
-    throw new Error(
-      'No se encontró Chromium. Asegurate de instalarlo en el build con:\n' +
-      'PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell'
-    );
-  }
-  console.log('Usando Chromium en:', exe);
-  return await chromium.launch({
-    headless: true,
-    executablePath: exe,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-      '--no-zygote',
-      '--single-process'
-    ]
-  });
-}
-
-
-// ---------- endpoint principal ----------
+/* ==================== Endpoint principal ==================== */
 app.post('/api/bcra', async (req, res) => {
   const { capital, intereses, corteISO, calculoISO } = req.body || {};
   if (!(capital >= 0) || !(intereses >= 0) || !corteISO || !calculoISO) {
@@ -296,8 +304,10 @@ app.post('/api/bcra', async (req, res) => {
     const page = await browser.newPage({ locale: 'es-AR' });
     await page.goto(BCRA_URL, { waitUntil: 'domcontentloaded', timeout: 180000 });
 
+    // Cerrar posibles banners
     try { await page.getByRole('button', { name: /aceptar|entendido|continuar/i }).click({ timeout: 1500 }); } catch {}
 
+    // Completar formulario
     const okInicio = await setFecha(page, 'inicio', fechaInicioISO);
     const okCierre = await setFecha(page, 'cierre', fechaCierreISO);
     if (!okInicio) throw new Error('No pude completar la “fecha de inicio”.');
@@ -306,8 +316,8 @@ app.post('/api/bcra', async (req, res) => {
     const okMonto = await setMonto(page, String(montoTotal));
     if (!okMonto) throw new Error('No pude completar el “monto”.');
 
+    // Calcular y leer resultados
     await clickCalcular(page);
-
     const { intereses: mInt, total: mTot } = await extraerMontos(page);
     const elegido = mTot != null ? mTot : mInt;
 
@@ -323,27 +333,20 @@ app.post('/api/bcra', async (req, res) => {
   }
 });
 
-// Salud/diag
+/* ==================== Salud y diagnóstico ==================== */
 app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
+
 app.get('/diag', (_req, res) => {
   const exe = findExecutable();
   res.json({
     node: process.version,
     PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
-    executableFound: exe,
+    chromiumExecutablePath: (() => { try { return chromium.executablePath?.(); } catch { return undefined; }})(),
+    resolvedExecutable: exe,
     exists: exe ? fs.existsSync(exe) : false
   });
 });
 
-app.get('/diag', (_req, res) => {
-  const exe = findExecutable();
-  res.json({
-    node: process.version,
-    PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
-    executableFound: exe,
-    exists: exe ? fs.existsSync(exe) : false,
-  });
-});
-
+/* ==================== Inicio del servidor ==================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor en http://localhost:${PORT}`));
