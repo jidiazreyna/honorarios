@@ -1,9 +1,21 @@
-﻿node_modules/
-playwright-report/
-test-results/
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 *.log
-.vscode/
-.DS_Store
-dist/
-build/
 .env
+.env.*
+
+# Playwright
+playwright-report/
+playwright/.cache/
+.test-results/
+trace.zip
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+OneDrive/
