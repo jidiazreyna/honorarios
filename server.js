@@ -1,48 +1,29 @@
 // server.js — llena Inicio = fecha de corte, Cierre = fecha de cálculo y Monto = capital + intereses
 // en la calculadora P 14290 del BCRA (sin API). Lee "Monto total" y lo devuelve al front.
-if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
-}
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { execFileSync } = require('child_process');
 const { chromium } = require('playwright');
 
-let ensureChromiumPromise;
-
-async function ensureChromiumInstalled() {
-  if (!ensureChromiumPromise) {
-    ensureChromiumPromise = (async () => {
-      const exePath = chromium.executablePath();
-      if (exePath && fs.existsSync(exePath)) {
-        return exePath;
-      }
-      try {
-        console.warn('Chromium no está instalado. Ejecutando "npx playwright install chromium"...');
-        execFileSync('npx', ['playwright', 'install', 'chromium'], { stdio: 'inherit' });
-      } catch (installErr) {
-        ensureChromiumPromise = null;
-        throw installErr;
-      }
-      const newExePath = chromium.executablePath();
-      if (!newExePath || !fs.existsSync(newExePath)) {
-        ensureChromiumPromise = null;
-        throw new Error('No se pudo instalar Chromium para Playwright.');
-      }
-      return newExePath;
-    })();
-  }
-  return ensureChromiumPromise;
-}
-
 const BCRA_URL = 'https://www.bcra.gob.ar/BCRAyVos/calculadora-intereses-tasa-justicia.asp';
-
 const app = express();
 app.use(express.json());
 
-// Servimos index.html desde la carpeta actual
+// ===== Entorno Playwright/Render =====
+// En Render conviene instalar browsers en /opt/render/.cache/ms-playwright durante el build.
+// No intentamos instalar en runtime. Si falta Chromium, devolvemos error claro.
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  // En Render: usar ruta de cache persistente
+  if (process.env.RENDER || process.env.RENDER_EXTERNAL_URL) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/render/.cache/ms-playwright';
+  } else {
+    // Local: dentro de node_modules (0)
+    process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+  }
+}
+
+// ===== Static / index.html =====
 const ROOT = __dirname;
 app.use(express.static(ROOT));
 app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
@@ -51,7 +32,7 @@ app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
 function parseARnum(str) {
   return parseFloat(String(str).replace(/\./g, '').replace(',', '.'));
 }
-const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
 // Forzar value + eventos (sirve para type="date" y máscaras)
 async function forceSetValue(page, locator, value) {
@@ -79,8 +60,8 @@ async function setFecha(page, which, isoValue) {
   if (await known.count()) {
     await known.scrollIntoViewIfNeeded().catch(() => {});
     try {
-      await known.fill(isoValue, { timeout: 2000 });
-      const got = await known.inputValue({ timeout: 500 }).catch(() => '');
+      await known.fill(isoValue, { timeout: 2500 });
+      const got = await known.inputValue({ timeout: 600 }).catch(() => '');
       if (got === isoValue) return true;
     } catch {}
     await forceSetValue(page, known, isoValue);
@@ -141,8 +122,8 @@ async function setMonto(page, valor) {
   if (await loc.count()) {
     await loc.scrollIntoViewIfNeeded().catch(() => {});
     try {
-      await loc.fill(String(valor), { timeout: 2000 });
-      const got = await loc.inputValue({ timeout: 500 }).catch(() => '');
+      await loc.fill(String(valor), { timeout: 2500 });
+      const got = await loc.inputValue({ timeout: 600 }).catch(() => '');
       if (got) return true;
     } catch {}
     await forceSetValue(page, loc, String(valor));
@@ -176,8 +157,8 @@ async function setMonto(page, valor) {
 
 // Click en “Calcular”
 async function clickCalcular(page) {
-  try { await page.getByRole('button', { name: /^calcular$/i }).click({ timeout: 4000 }); return; } catch {}
-  try { await page.click('text=/^\\s*Calcular\\s*$/i', { timeout: 4000 }); return; } catch {}
+  try { await page.getByRole('button', { name: /^calcular$/i }).click({ timeout: 5000 }); return; } catch {}
+  try { await page.click('text=/^\\s*Calcular\\s*$/i', { timeout: 5000 }); return; } catch {}
   const done = await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button,input[type="submit"],a'))
       .find(el => /calcular/i.test(el.textContent || el.value || ''));
@@ -187,10 +168,11 @@ async function clickCalcular(page) {
   if (!done) throw new Error('No encontré el botón "Calcular".');
 }
 
-// === Leer resultados: { intereses, total } — toma SIEMPRE la 2ª alerta (Monto total)
+// === Leer resultados: { intereses, total } — preferimos SIEMPRE “Monto total”
 async function extraerMontos(page) {
   // espera a que aparezcan las cajas de resultado
-  await page.waitForSelector('.alert-success, .alert.alert-success', { timeout: 15000 });
+  await page.waitForSelector('.alert-success, .alert.alert-success', { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
 
   const res = await page.evaluate(() => {
     const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -218,36 +200,32 @@ async function extraerMontos(page) {
 
   const toNum = (s) => (s == null ? null : parseFloat(String(s).replace(/\./g, '').replace(',', '.')));
 
-  const amounts = res.alerts
+  const amounts = (res.alerts || [])
     .map((a) => ({ idx: a.idx, value: toNum(a.amountRaw) }))
     .filter((a) => Number.isFinite(a.value));
 
   let total = toNum(res.totalByText);
   let intereses = toNum(res.interesesByText);
 
+  // Fallback por posición: en la calculadora del BCRA, la 2ª caja es "Monto total"
   if (total == null) {
     const secondBox = amounts.find((a) => a.idx === 1);
     if (secondBox) total = secondBox.value;
   }
-
   if (intereses == null) {
     const firstBox = amounts.find((a) => a.idx === 0);
     if (firstBox) intereses = firstBox.value;
   }
 
+  // Último fallback: mayor de todos los importes como total
   if (amounts.length) {
     const sorted = [...amounts].sort((a, b) => b.value - a.value).map((a) => a.value);
-    if (total == null) {
-      total = sorted[0];
-    }
+    if (total == null) total = sorted[0];
     if (intereses == null && sorted.length > 1) {
       const uniqueSorted = Array.from(new Set(sorted));
       const candidate = uniqueSorted.find((val) => val !== total);
-      if (candidate != null) {
-        intereses = candidate;
-      } else if (uniqueSorted.length > 1) {
-        intereses = uniqueSorted[1];
-      }
+      if (candidate != null) intereses = candidate;
+      else if (uniqueSorted.length > 1) intereses = uniqueSorted[1];
     }
   }
 
@@ -255,6 +233,22 @@ async function extraerMontos(page) {
   return { intereses: intereses ?? null, total };
 }
 
+// ===== Lanzar navegador con flags para Render =====
+async function launchBrowser() {
+  // (opcional) log para diagnóstico
+  try { console.log('Chromium path:', chromium.executablePath?.()); } catch {}
+  return await chromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--no-zygote',
+      '--single-process'
+    ]
+  });
+}
 
 // ---------- endpoint principal ----------
 app.post('/api/bcra', async (req, res) => {
@@ -263,15 +257,14 @@ app.post('/api/bcra', async (req, res) => {
     return res.status(400).json({ error: 'Parámetros inválidos.' });
   }
 
-  // Mapeo que pediste
+  // Mapeo pedido:
   const fechaInicioISO = corteISO;      // inicio = fecha de corte (planilla)
   const fechaCierreISO = calculoISO;    // cierre = fecha de cálculo (hasta)
   const montoTotal     = Number(capital) + Number(intereses); // cap + int
 
   let browser;
   try {
-    await ensureChromiumInstalled();
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    browser = await launchBrowser();
     const page = await browser.newPage({ locale: 'es-AR' });
     await page.goto(BCRA_URL, { waitUntil: 'domcontentloaded', timeout: 180000 });
 
@@ -284,7 +277,7 @@ app.post('/api/bcra', async (req, res) => {
     if (!okInicio) throw new Error('No pude completar la “fecha de inicio”.');
     if (!okCierre) throw new Error('No pude completar la “fecha de cierre”.');
 
-    // === Completar monto ===
+    // === Completar monto (cap + int) ===
     const okMonto = await setMonto(page, String(montoTotal));
     if (!okMonto) throw new Error('No pude completar el “monto”.');
 
@@ -295,19 +288,49 @@ app.post('/api/bcra', async (req, res) => {
     const { intereses: mInt, total: mTot } = await extraerMontos(page);
     const elegido = (mTot != null) ? mTot : mInt;
 
-    // Para compatibilidad, el frontend espera "interes"; le mando el TOTAL.
+    // Para compatibilidad, el frontend espera "interes"; enviamos el TOTAL.
     res.json({ ok: true, interes: elegido, detalle: { intereses: mInt, total: mTot } });
 
   } catch (err) {
     console.error('BCRA error:', err);
-    res.status(500).json({ error: String(err.message || err) });
+    res.status(500).json({
+      error: String(err && err.message ? err.message : err),
+      hint: 'Verificá que en el build se haya ejecutado "npx playwright install chromium" y que PLAYWRIGHT_BROWSERS_PATH esté configurada.'
+    });
   } finally {
     if (browser) { try { await browser.close(); } catch {} }
   }
 });
 
-app.get('/health', (_req, res) => {
-  res.type('text/plain').send('ok');
+// ===== Endpoints de salud y diagnóstico =====
+app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
+
+app.get('/diag', async (_req, res) => {
+  const out = {};
+  try {
+    out.node = process.version;
+    out.env = {
+      PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD,
+      NODE_ENV: process.env.NODE_ENV,
+      RENDER: !!process.env.RENDER || !!process.env.RENDER_EXTERNAL_URL
+    };
+    try { out.execPath = chromium.executablePath?.(); } catch {}
+    if (out.execPath) out.execExists = fs.existsSync(out.execPath);
+    let ok = false;
+    try {
+      const b = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--no-zygote','--single-process']
+      });
+      await b.close();
+      ok = true;
+    } catch (e) { out.launchError = String(e); }
+    out.canLaunch = ok;
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: String(e), partial: out });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
