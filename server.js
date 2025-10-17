@@ -5,6 +5,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright');
+const { spawnSync } = require('child_process');
 
 const BCRA_URL = 'https://www.bcra.gob.ar/BCRAyVos/calculadora-intereses-tasa-justicia.asp';
 const app = express();
@@ -33,7 +34,13 @@ function findExecutable() {
   // 2) Raíz por defecto en Render (por si la env var no llegó al runtime)
   roots.add('/opt/render/.cache/ms-playwright');
 
-  // 3) Intento directo: lo que Playwright “cree”
+  // 3) Posibles ubicaciones dentro del proyecto (incluye BROWSERS_PATH=0)
+  roots.add(path.join(__dirname, '.playwright'));
+  roots.add(path.join(__dirname, 'node_modules', '.cache', 'ms-playwright'));
+  roots.add(path.join(__dirname, 'node_modules', 'playwright', '.local-browsers'));
+  roots.add(path.join(__dirname, 'node_modules', 'playwright-core', '.local-browsers'));
+
+  // 4) Intento directo: lo que Playwright “cree”
   try {
     const guessed = chromium.executablePath?.();
     if (guessed && fs.existsSync(guessed)) return guessed;
@@ -47,7 +54,7 @@ function findExecutable() {
     }
   } catch {}
 
-  // 4) Búsqueda por patrones dentro de los roots
+  // 5) Búsqueda por patrones dentro de los roots
   for (const root of roots) {
     if (!root || !fs.existsSync(root)) continue;
 
@@ -70,16 +77,23 @@ function findExecutable() {
 }
 
 async function launchBrowser() {
-  const exe = findExecutable();
+  let exe = findExecutable();
   console.log('[diag] PLAYWRIGHT_BROWSERS_PATH =', process.env.PLAYWRIGHT_BROWSERS_PATH);
   try { console.log('[diag] chromium.executablePath() =', chromium.executablePath?.()); } catch {}
   console.log('[diag] resolved executable =', exe, 'exists?', exe ? fs.existsSync(exe) : false);
 
   if (!exe) {
-    throw new Error(
-      'No se encontró Chromium. Asegurate de instalarlo en el build con:\n' +
-      'PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell'
-    );
+    if (maybeInstallBrowsers()) {
+      exe = findExecutable();
+      console.log('[diag] post-install executable =', exe, 'exists?', exe ? fs.existsSync(exe) : false);
+    }
+
+    if (!exe) {
+      throw new Error(
+        'No se encontró Chromium y la instalación automática falló. ' +
+        'Revisá los logs de Playwright para más detalles.'
+      );
+    }
   }
 
   return await chromium.launch({
@@ -94,6 +108,49 @@ async function launchBrowser() {
       '--single-process'
     ]
   });
+}
+
+let installAttempted = false;
+function maybeInstallBrowsers() {
+  if (installAttempted) return false;
+  installAttempted = true;
+
+  const fallbackPath = path.join(__dirname, '.playwright');
+  const desiredPath =
+    process.env.PLAYWRIGHT_BROWSERS_PATH && process.env.PLAYWRIGHT_BROWSERS_PATH !== '0'
+      ? process.env.PLAYWRIGHT_BROWSERS_PATH
+      : fallbackPath;
+
+  try { fs.mkdirSync(desiredPath, { recursive: true }); } catch {}
+
+  const env = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: desiredPath };
+  const localBin = path.join(__dirname, 'node_modules', '.bin', 'playwright');
+  const hasLocal = fs.existsSync(localBin);
+  const cmd = hasLocal ? localBin : 'npx';
+  const args = hasLocal
+    ? ['install', 'chromium', 'chromium-headless-shell']
+    : ['playwright', 'install', 'chromium', 'chromium-headless-shell'];
+
+  console.log('[diag] intentando instalar Playwright browsers en', desiredPath);
+  const result = spawnSync(cmd, args, {
+    env,
+    encoding: 'utf8',
+    shell: !hasLocal
+  });
+
+  if (result.stdout) console.log(result.stdout.trim());
+  if (result.stderr) console.error(result.stderr.trim());
+
+  if (result.error) {
+    console.error('[diag] error ejecutando playwright install:', result.error);
+    return false;
+  }
+
+  const ok = result.status === 0;
+  if (ok) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = desiredPath;
+  }
+  return ok;
 }
 
 /* ==================== Static / index.html ==================== */
