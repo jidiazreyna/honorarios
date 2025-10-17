@@ -39,8 +39,8 @@ async function setFecha(page, which, isoValue) {
 
   // 1) Intento por ID/NAME conocidos
   const selKNOWN = isInicio
-    ? '#FechaInicio, input[name="FechaInicio"]'
-    : '#FechaCierre, input[name="FechaCierre"], #FechaFin, input[name="FechaFin"]';
+    ? '#FechaInicio, input[name="FechaInicio" i]'
+    : '#FechaCierre, input[name="FechaCierre" i], #FechaFin, input[name="FechaFin" i]';
 
   const known = page.locator(selKNOWN).first();
   if (await known.count()) {
@@ -103,7 +103,7 @@ async function setFecha(page, which, isoValue) {
 // ==== MONTO ====
 // setea el monto buscando #Monto/name=Monto o por su <label> “Ingresar un monto”
 async function setMonto(page, valor) {
-  const selMonto = '#Monto, input[name="Monto"], input[type="text"]:not([placeholder*="dd/mm"])';
+  const selMonto = '#Monto, input[name="Monto" i], input[type="text"]:not([placeholder*="dd/mm"])';
   const loc = page.locator(selMonto).first();
   if (await loc.count()) {
     await loc.scrollIntoViewIfNeeded().catch(() => {});
@@ -160,46 +160,66 @@ async function extraerMontos(page) {
   await page.waitForSelector('.alert-success, .alert.alert-success', { timeout: 15000 });
 
   const res = await page.evaluate(() => {
-    const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    const getAmount = el => {
-      const m = (el.innerText || '').match(/\$\s*([\d\.\,]+)/);
+    const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const getAmount = (text) => {
+      const m = String(text || '').match(/\$\s*([\d\.\,]+)/);
       return m ? m[1] : null;
     };
 
-    const alerts = Array.from(document.querySelectorAll('.alert-success, .alert.alert-success'));
+    const alerts = Array.from(document.querySelectorAll('.alert-success, .alert.alert-success'))
+      .map((el, idx) => {
+        const text = el.innerText || '';
+        return {
+          idx,
+          text,
+          normText: norm(text),
+          amountRaw: getAmount(text),
+        };
+      });
 
-    // Intenta por texto del rótulo
-    let intereses = null, total = null;
-    for (const a of alerts) {
-      const t = norm(a.innerText || '');
-      if (t.includes('monto de intereses')) intereses = getAmount(a);
-      if (t.includes('monto total'))      total     = getAmount(a);
-    }
+    const totalByText = alerts.find(a => a.normText.includes('monto total'))?.amountRaw || null;
+    const interesesByText = alerts.find(a => a.normText.includes('monto de intereses'))?.amountRaw || null;
 
-    // Fallback por posición: en esta página la 2ª caja es el "Monto total"
-    if (!total && alerts[1]) total = getAmount(alerts[1]);
-    if (!intereses && alerts[0]) intereses = getAmount(alerts[0]);
-
-    // Además devolvemos la secuencia por si hay otro fallback en Node
-    const seq = alerts.map(a => getAmount(a)).filter(Boolean);
-    return { intereses, total, seq };
+    return { alerts, totalByText, interesesByText };
   });
 
-  const toNum = s => s == null ? null : parseFloat(String(s).replace(/\./g, '').replace(',', '.'));
+  const toNum = (s) => (s == null ? null : parseFloat(String(s).replace(/\./g, '').replace(',', '.')));
 
-  let intereses = toNum(res.intereses);
-  let total     = toNum(res.total);
+  const amounts = res.alerts
+    .map((a) => ({ idx: a.idx, value: toNum(a.amountRaw) }))
+    .filter((a) => Number.isFinite(a.value));
 
-  // Último fallback: toma el mayor de las cajas (normalmente es el total)
-  if (total == null && res.seq && res.seq.length) {
-    total = res.seq.map(toNum).sort((a, b) => b - a)[0] ?? null;
+  let total = toNum(res.totalByText);
+  let intereses = toNum(res.interesesByText);
+
+  if (total == null) {
+    const secondBox = amounts.find((a) => a.idx === 1);
+    if (secondBox) total = secondBox.value;
   }
-  if (intereses == null && res.seq && res.seq.length > 1) {
-    intereses = toNum(res.seq[0]);
+
+  if (intereses == null) {
+    const firstBox = amounts.find((a) => a.idx === 0);
+    if (firstBox) intereses = firstBox.value;
+  }
+
+  if (amounts.length) {
+    const sorted = [...amounts].sort((a, b) => b.value - a.value).map((a) => a.value);
+    if (total == null) {
+      total = sorted[0];
+    }
+    if (intereses == null && sorted.length > 1) {
+      const uniqueSorted = Array.from(new Set(sorted));
+      const candidate = uniqueSorted.find((val) => val !== total);
+      if (candidate != null) {
+        intereses = candidate;
+      } else if (uniqueSorted.length > 1) {
+        intereses = uniqueSorted[1];
+      }
+    }
   }
 
   if (total == null) throw new Error('No pude leer el “Monto total” en la página del BCRA.');
-  return { intereses, total };
+  return { intereses: intereses ?? null, total };
 }
 
 
@@ -217,7 +237,7 @@ app.post('/api/bcra', async (req, res) => {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const page = await browser.newPage({ locale: 'es-AR' });
     await page.goto(BCRA_URL, { waitUntil: 'domcontentloaded', timeout: 180000 });
 
@@ -250,6 +270,10 @@ app.post('/api/bcra', async (req, res) => {
   } finally {
     if (browser) { try { await browser.close(); } catch {} }
   }
+});
+
+app.get('/health', (_req, res) => {
+  res.type('text/plain').send('ok');
 });
 
 const PORT = process.env.PORT || 3000;
