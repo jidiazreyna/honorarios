@@ -1,8 +1,41 @@
 // server.js — llena Inicio = fecha de corte, Cierre = fecha de cálculo y Monto = capital + intereses
 // en la calculadora P 14290 del BCRA (sin API). Lee "Monto total" y lo devuelve al front.
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+}
+
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
+const { execFileSync } = require('child_process');
 const { chromium } = require('playwright');
+
+let ensureChromiumPromise;
+
+async function ensureChromiumInstalled() {
+  if (!ensureChromiumPromise) {
+    ensureChromiumPromise = (async () => {
+      const exePath = chromium.executablePath();
+      if (exePath && fs.existsSync(exePath)) {
+        return exePath;
+      }
+      try {
+        console.warn('Chromium no está instalado. Ejecutando "npx playwright install chromium"...');
+        execFileSync('npx', ['playwright', 'install', 'chromium'], { stdio: 'inherit' });
+      } catch (installErr) {
+        ensureChromiumPromise = null;
+        throw installErr;
+      }
+      const newExePath = chromium.executablePath();
+      if (!newExePath || !fs.existsSync(newExePath)) {
+        ensureChromiumPromise = null;
+        throw new Error('No se pudo instalar Chromium para Playwright.');
+      }
+      return newExePath;
+    })();
+  }
+  return ensureChromiumPromise;
+}
 
 const BCRA_URL = 'https://www.bcra.gob.ar/BCRAyVos/calculadora-intereses-tasa-justicia.asp';
 
@@ -237,6 +270,7 @@ app.post('/api/bcra', async (req, res) => {
 
   let browser;
   try {
+    await ensureChromiumInstalled();
     browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const page = await browser.newPage({ locale: 'es-AR' });
     await page.goto(BCRA_URL, { waitUntil: 'domcontentloaded', timeout: 180000 });
