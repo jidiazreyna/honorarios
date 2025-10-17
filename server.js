@@ -20,32 +20,48 @@ if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
 
 // Busca el binario real (chrome o headless_shell) dentro de PLAYWRIGHT_BROWSERS_PATH
 function findExecutable() {
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || '';
-  const candidates = [];
+  const roots = new Set();
 
-  const pushIfExists = p => { if (p && fs.existsSync(p)) candidates.push(p); };
+  // 1) Preferí la ruta de Render
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) roots.add(process.env.PLAYWRIGHT_BROWSERS_PATH);
+  // 2) Raíz por defecto en Render (por si la env var no llegó al runtime)
+  roots.add('/opt/render/.cache/ms-playwright');
 
-  // Recorrer subdirectorios chromium-* y chromium_headless_shell-*
-  if (root && fs.existsSync(root)) {
+  // 3) Intento directo: lo que Playwright “cree”
+  try {
+    const guessed = chromium.executablePath?.();
+    if (guessed && fs.existsSync(guessed)) return guessed;
+
+    // Si apuntó a headless_shell pero no existe, intento deducir chrome
+    if (guessed && /chromium_headless_shell-\d+\/chrome-linux\/headless_shell$/.test(guessed)) {
+      const chromeGuess = guessed
+        .replace('chromium_headless_shell-', 'chromium-')
+        .replace(/\/headless_shell$/, '/chrome');
+      if (fs.existsSync(chromeGuess)) return chromeGuess;
+    }
+  } catch {}
+
+  // 4) Búsqueda por patrones dentro de los roots
+  for (const root of roots) {
+    if (!root || !fs.existsSync(root)) continue;
     const dirs = fs.readdirSync(root).filter(d =>
       d.startsWith('chromium-') || d.startsWith('chromium_headless_shell-')
     );
-    // preferimos chrome, luego headless_shell
+
+    // Probar primero chrome, luego headless_shell
     for (const d of dirs) {
-      pushIfExists(path.join(root, d, 'chrome-linux', 'chrome'));
-      pushIfExists(path.join(root, d, 'chrome-linux', 'headless_shell'));
+      const chrome = path.join(root, d, 'chrome-linux', 'chrome');
+      if (fs.existsSync(chrome)) return chrome;
+    }
+    for (const d of dirs) {
+      const hs = path.join(root, d, 'chrome-linux', 'headless_shell');
+      if (fs.existsSync(hs)) return hs;
     }
   }
 
-  // fallback a lo que Playwright cree tener (por si corre local con node_modules)
-  try {
-    const guessed = chromium.executablePath?.();
-    pushIfExists(guessed);
-  } catch {}
-
-  // Devolver el primero válido (chrome > headless_shell)
-  return candidates.find(p => /\/chrome$/.test(p)) || candidates[0] || null;
+  return null;
 }
+
 
 // ===== Static / index.html =====
 const ROOT = __dirname;
@@ -243,14 +259,14 @@ async function launchBrowser() {
   const exe = findExecutable();
   if (!exe) {
     throw new Error(
-      'No se encontró Chromium en PLAYWRIGHT_BROWSERS_PATH. ' +
-      'Asegurate de ejecutar en el build: "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell".'
+      'No se encontró Chromium. Asegurate de instalarlo en el build con:\n' +
+      'PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium chromium-headless-shell'
     );
   }
   console.log('Usando Chromium en:', exe);
   return await chromium.launch({
     headless: true,
-    executablePath: exe,               // <-- fuerza el binario que SÍ existe
+    executablePath: exe,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -261,6 +277,7 @@ async function launchBrowser() {
     ]
   });
 }
+
 
 // ---------- endpoint principal ----------
 app.post('/api/bcra', async (req, res) => {
@@ -315,6 +332,16 @@ app.get('/diag', (_req, res) => {
     PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
     executableFound: exe,
     exists: exe ? fs.existsSync(exe) : false
+  });
+});
+
+app.get('/diag', (_req, res) => {
+  const exe = findExecutable();
+  res.json({
+    node: process.version,
+    PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
+    executableFound: exe,
+    exists: exe ? fs.existsSync(exe) : false,
   });
 });
 
